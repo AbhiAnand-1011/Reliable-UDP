@@ -1,4 +1,4 @@
-# SIUU-RUDP: Reliable User Datagram Protocol
+# RUDP: Reliable User Datagram Protocol
 
 ## Overview
 SIUU-RUDP is a custom Reliable User Datagram Protocol implementation written in C++. It facilitates reliable file transfers over standard UDP sockets by introducing TCP-like mechanisms such as connection handshakes, sequence numbering, CRC32 checksum validation, acknowledgment (ACK) packets, and sliding-window retransmissions.
