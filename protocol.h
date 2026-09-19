@@ -35,7 +35,7 @@ struct PacketHeader {
 #pragma pack(pop)
 
 struct Packet {
-    PacketHeader header;
+    PacketHeader header{};
     std::vector<uint8_t> payload;
 };
 
@@ -57,6 +57,8 @@ std::vector<bool> decodeBitmap(const std::vector<uint8_t> &bitmap, size_t window
 
 uint32_t crc32(const uint8_t *buf, size_t len);
 uint32_t crc32(const std::vector<uint8_t> &v);
+uint32_t crc32Update(uint32_t crc, const uint8_t *buf, size_t len);
+uint32_t crc32Update(uint32_t crc, const std::vector<uint8_t> &v);
 
 bool parseHelloPayload(const std::vector<uint8_t> &payload, std::string &filename, uint32_t &total_chunks, uint32_t &file_crc32);
 std::vector<uint8_t> buildHelloPayload(const std::string &filename, uint32_t total_chunks, uint32_t file_crc32);

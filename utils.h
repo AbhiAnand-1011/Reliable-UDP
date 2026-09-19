@@ -12,5 +12,6 @@ bool assembleChunksFromDir(const std::string &outdir, const std::string &final_p
 uint64_t currentTimeMs();
 void sleepMs(uint64_t ms);
 bool ensureDir(const std::string &path);
+std::string sanitizeFilename(const std::string &input);
 
 #endif

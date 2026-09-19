@@ -27,13 +27,13 @@ Custom packets are restricted to a safe 1400-byte maximum size to avoid IP fragm
 - **Checksum:** CRC32 hash of the payload for corruption detection.
 
 ## Process and Data Flow
-The file transfer follows a strict lifecycle to ensure absolute reliability over a connectionless protocol.
+The file transfer follows a strict lifecycle for a UDP-based reliable transfer.
 
-1. **The Handshake:** The Sender transmits a `HELLO` packet containing the file metadata (name, total chunks, full file CRC). The Receiver validates this and responds with a `HELLO_ACK`.
-2. **Data Transmission:** The Sender transmits `DATA` packets up to a defined sliding window limit (default: 32 in-flight packets). 
-3. **Validation and Acknowledgment:** The Receiver catches `DATA` packets, recalculates the CRC32 checksum, and compares it to the header. If valid, the chunk is written to disk, and an `ACK` packet is immediately fired back to the Sender.
-4. **Retransmission:** The Sender monitors incoming ACKs. If a packet remains unacknowledged past the 500ms timeout threshold, it is assumed dropped and is automatically retransmitted.
-5. **Assembly and Teardown:** Once the Receiver possesses all expected chunks, it assembles the `.part` files into the final output file. The Sender issues a `FIN` packet, the Receiver replies with a `FIN_ACK`, and both sockets close cleanly.
+1. **The Handshake:** The Sender transmits a `HELLO` packet containing the file metadata (name, chunk count, and file CRC). The Receiver validates the metadata and responds with a `HELLO_ACK`.
+2. **Data Transmission:** The Sender transmits `DATA` packets within a bounded sliding window. Packets are retried only when they actually time out, and per-packet retry tracking prevents endless resend loops.
+3. **Validation and Acknowledgment:** The Receiver validates packet integrity, stores chunks only after a successful write, and sends `ACK` values back for valid DATA packets.
+4. **Integrity and Assembly:** Once all expected chunks are present, the receiver assembles the output file and validates the final CRC32 before reporting success. The receiver does not exit merely because it has all DATA chunks; it waits for a valid `FIN`.
+5. **Teardown:** The Sender sends a `FIN` only after data completion. The Receiver verifies the FIN metadata, replies with `FIN_ACK`, and exits cleanly after the grace period for duplicate/retransmitted FINs has elapsed.
 
 ## Usage Instructions
 
