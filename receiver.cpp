@@ -458,14 +458,27 @@ int main(int argc, char *argv[]) {
             }
 
             if (total_chunks == 0) {
-                std::cout
-                    << "empty file transfer: waiting for FIN\n";
+    final_path = outdir + "/" + filename;
 
-                transfer_verified = true;
-                state =
-                    ReceiveState::WAIT_FOR_FIN;
-            }
+    std::ofstream empty_file(
+        final_path,
+        std::ios::binary | std::ios::trunc
+    );
 
+    if (!empty_file) {
+        std::cerr
+            << "failed to create empty output file\n";
+        close(sockfd);
+        return 1;
+    }
+
+    std::cout
+        << "empty file transfer: waiting for FIN\n";
+
+    transfer_verified = true;
+    state =
+        ReceiveState::WAIT_FOR_FIN;
+}
             continue;
         }
 
