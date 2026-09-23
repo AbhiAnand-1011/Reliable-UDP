@@ -10,7 +10,7 @@ The implementation uses a bounded transmission window with per-packet ACKs and r
 
 ## Architecture
 
-The project is divided into three logical layers:
+The project is divided into three logical layers.
 
 ### 1. Protocol Layer — `protocol.h` / `protocol.cpp`
 
@@ -24,7 +24,7 @@ Defines the wire protocol, including:
 - HELLO, HELLO_ACK, DATA, ACK, NACK, FIN, and FIN_ACK packet construction
 - Bitmap encoding and decoding helpers
 
-The active transfer path currently uses HELLO, HELLO_ACK, DATA, ACK, FIN, and FIN_ACK. NACK and bitmap helpers are implemented but are not used by the active sender/receiver path.
+The active transfer path uses `HELLO`, `HELLO_ACK`, `DATA`, `ACK`, `FIN`, and `FIN_ACK`. `NACK` and bitmap helpers are implemented but are not used by the active sender/receiver path.
 
 ### 2. Utility Layer — `utils.h` / `utils.cpp`
 
@@ -39,7 +39,7 @@ Handles local file operations, including:
 
 ### 3. Endpoint Layer — `sender.cpp` / `receiver.cpp`
 
-Implements the transfer state machines.
+Implements the sender and receiver state machines.
 
 **Sender**
 
@@ -61,11 +61,11 @@ Implements the transfer state machines.
 - Sanitizes the requested filename
 - Accepts DATA packets in any order
 - Stores chunks as `.part` files
-- ACKs valid DATA packets, including duplicate or late DATA
+- ACKs valid DATA packets, including duplicate and late DATA
 - Reassembles the file once all chunks arrive
 - Verifies the complete-file CRC32
 - Validates FIN and responds with FIN_ACK
-- Remains active briefly after FIN_ACK to handle duplicate or retransmitted FIN/DATA packets
+- Remains active briefly after completion to handle duplicate or retransmitted DATA and FIN packets
 
 ## Packet Structure
 
@@ -84,7 +84,7 @@ Each packet contains a 16-byte custom header followed by an optional payload.
 
 ### Checksum
 
-The checksum is a CRC32 calculated over the canonical packet representation containing:
+The checksum is a CRC32 calculated over a canonical representation containing:
 
 - Protocol version
 - Packet type
@@ -117,7 +117,7 @@ The receiver validates the metadata and responds with `HELLO_ACK`.
 
 The sender transmits numbered `DATA` packets using a bounded window of outstanding packets.
 
-Each packet contains:
+Each DATA packet contains:
 
 - Sequence number
 - Total chunk count
@@ -153,9 +153,9 @@ The transfer is considered verified only when the complete-file CRC matches.
 
 After all DATA packets have been acknowledged, the sender transmits `FIN`.
 
-The receiver validates the FIN metadata and responds with `FIN_ACK`.
+The receiver validates the file CRC carried by the FIN packet and responds with `FIN_ACK`.
 
-The receiver remains active for a short grace period so that duplicate or retransmitted FIN/DATA packets can still be acknowledged.
+The receiver remains active for a short grace period so that duplicate or retransmitted DATA and FIN packets can still be acknowledged.
 
 ## Reliability Model
 
@@ -190,10 +190,16 @@ Path separators, absolute paths, `.`, and `..` are rejected to prevent the sende
 
 ### Prerequisites
 
+For the core protocol:
+
 - Linux, macOS, or another POSIX-compatible environment
 - C++17-compatible compiler
 - `g++`
 - POSIX UDP socket support
+
+The included benchmark scripts additionally assume a Unix-like environment with Bash, GNU `timeout`, and standard command-line utilities.
+
+The packet-loss benchmark uses Linux `tc netem`.
 
 ### Build
 
@@ -243,7 +249,7 @@ cmp test_file.txt received/test_file.txt && echo "TRANSFER OK"
 
 ## Benchmarking
 
-The project includes a small benchmark and analysis pipeline:
+The project includes a benchmark and analysis pipeline:
 
 ```text
 benchmark/
@@ -273,6 +279,8 @@ The benchmark records:
 - ACK count
 - RTT sample count
 - Per-run RTT p50/p95/p99
+
+The analysis script computes aggregate transfer-time and goodput percentiles across successful runs. RTT p50/p95/p99 are calculated per run by the sender and summarized across runs; the benchmark does not store every individual RTT sample in the CSV.
 
 ## Measured Results
 
@@ -311,7 +319,7 @@ Test configuration:
 
 - 30 runs
 - 10 MiB file per run
-- Localhost
+- Sender and receiver on localhost
 - 1% packet loss induced on the loopback interface using Linux `tc netem`
 
 | Metric | Result |
@@ -332,7 +340,9 @@ Median per-run RTT percentiles:
 - RTT p95: 1.728 ms
 - RTT p99: 2.804 ms
 
-The packet-loss test demonstrates that the protocol can complete file transfers successfully despite induced loss by retransmitting missing or unacknowledged DATA packets.
+The packet-loss test demonstrates successful completion of file transfers under controlled packet loss through timeout-based retransmission and per-packet acknowledgment.
+
+These measurements are specific to the tested localhost environment and should not be interpreted as general network performance characteristics.
 
 ## Implementation Characteristics
 
@@ -361,12 +371,12 @@ The packet-loss test demonstrates that the protocol can complete file transfers 
 - The sender currently loads the complete input file into memory before transmission.
 - The retransmission timeout is fixed at 500 ms.
 - There is no congestion-control mechanism.
-- RTT estimation is observational rather than adaptive.
+- RTT measurement is observational rather than adaptive.
 - NACK and bitmap helpers are implemented but are not used by the active transfer path.
 - Temporary `.part` files are not automatically removed after successful assembly.
 - The receiver is designed around one active transfer per process.
 - The protocol provides no encryption or authentication.
-- Empty-file handling is supported through the protocol handshake and FIN exchange but is a special case of the general file-transfer path.
+- Empty-file transfers are handled as a special case of the handshake/FIN path rather than the normal chunk-assembly path.
 
 ## What This Project Demonstrates
 
