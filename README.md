@@ -1,643 +1,404 @@
 # Reliable-UDP
 
-A custom **Reliable UDP (RUDP) file-transfer protocol** implemented in C++ using POSIX UDP sockets.
+A custom reliable file-transfer protocol built on top of UDP using C++ and POSIX sockets.
 
-Reliable-UDP takes the connectionless and unreliable nature of UDP and builds a small application-level reliability layer on top of it. The protocol provides session initialization, sequence-numbered file chunks, acknowledgments, timeout-based retransmissions, packet integrity validation, ordered file reconstruction, and end-to-end CRC32 verification.
+## Overview
 
-The project is implemented from the ground up rather than relying on TCP, providing hands-on experience with networking, transport-layer concepts, packet formats, binary serialization, reliability mechanisms, checksums, and POSIX socket programming.
+Reliable-UDP adds application-level reliability mechanisms to standard UDP to support reliable file transfer. The protocol implements metadata exchange, sequence-numbered data packets, per-packet acknowledgments, timeout-based retransmissions, CRC32 integrity validation, ordered file reconstruction, and explicit transfer teardown.
 
----
-
-## Features
-
-- Custom binary packet protocol on top of UDP
-- `HELLO` / `HELLO_ACK` session initialization
-- Sequence-numbered data packets
-- 1200-byte file chunking
-- Bounded sender transmission window of 32 packets
-- Per-packet acknowledgments
-- Timeout-based retransmission
-- Maximum retransmission limit
-- CRC32 packet integrity validation
-- End-to-end CRC32 verification of the reconstructed file
-- Out-of-order packet reception
-- Ordered chunk reassembly
-- Temporary `.part` files for received chunks
-- Filename sanitization to prevent path traversal
-- `FIN` / `FIN_ACK` transfer teardown
-- Configurable receiver port and output directory
-- Binary file transfer support
-
----
+The implementation uses a bounded transmission window with per-packet ACKs and retransmission tracking rather than relying on TCP.
 
 ## Architecture
 
-The implementation is divided into three logical layers.
+The project is divided into three logical layers:
 
-### 1. Protocol Layer
+### 1. Protocol Layer — `protocol.h` / `protocol.cpp`
 
-**Files:**
-- `protocol.h`
-- `protocol.cpp`
+Defines the wire protocol, including:
 
-This layer defines the wire protocol and is responsible for:
-
+- Packet header structure
 - Packet types
-- Packet headers
-- Serialization
-- Deserialization
-- Network byte order conversion
-- CRC32 calculation
-- HELLO metadata encoding/decoding
-- Packet construction
-- Bitmap encoding/decoding helpers
-- NACK packet construction
+- Serialization and deserialization
+- Network byte-order handling
+- CRC32 checksum generation and validation
+- HELLO, HELLO_ACK, DATA, ACK, NACK, FIN, and FIN_ACK packet construction
+- Bitmap encoding and decoding helpers
 
-The protocol currently defines the following packet types:
+The active transfer path currently uses HELLO, HELLO_ACK, DATA, ACK, FIN, and FIN_ACK. NACK and bitmap helpers are implemented but are not used by the active sender/receiver path.
 
-```text
-HELLO
-HELLO_ACK
-DATA
-ACK
-NACK
-FIN
-FIN_ACK
-```
+### 2. Utility Layer — `utils.h` / `utils.cpp`
 
-`NACK` packets and bitmap helpers are implemented in the protocol layer but are currently not used by the active sender/receiver transfer path.
+Handles local file operations, including:
 
----
-
-### 2. Utility Layer
-
-**Files:**
-- `utils.h`
-- `utils.cpp`
-
-This layer handles local file operations and supporting functionality:
-
-- Reading files into fixed-size chunks
-- Writing received chunks to temporary files
-- Reassembling chunks in sequence-number order
+- Splitting input files into 1200-byte chunks
+- Writing received chunks to temporary `.part` files
+- Reassembling chunks in sequence order
 - Creating output directories
-- CRC-related file processing
-- Monotonic time measurement
 - Filename sanitization
+- Local timing utilities
 
----
+### 3. Endpoint Layer — `sender.cpp` / `receiver.cpp`
 
-### 3. Endpoint Layer
+Implements the transfer state machines.
 
-**Files:**
-- `sender.cpp`
-- `receiver.cpp`
+**Sender**
 
-#### Sender
+- Reads the complete input file into memory
+- Computes the complete-file CRC32
+- Performs the HELLO handshake
+- Sends sequence-numbered DATA packets
+- Maintains a bounded window of outstanding packets
+- Processes per-packet ACKs
+- Retransmits packets after a fixed timeout
+- Enforces a maximum retransmission count
+- Sends FIN after successful DATA transfer
+- Collects transfer and RTT metrics
 
-The sender:
+**Receiver**
 
-1. Opens the input file.
-2. Splits it into 1200-byte chunks.
-3. Calculates the complete file CRC32.
-4. Sends a `HELLO` containing file metadata.
-5. Waits for `HELLO_ACK`.
-6. Sends sequence-numbered `DATA` packets.
-7. Tracks acknowledgments for individual chunks.
-8. Retransmits unacknowledged packets after the timeout expires.
-9. Sends `FIN` after all chunks have been acknowledged.
-10. Waits for `FIN_ACK`.
+- Binds to a UDP port
+- Validates HELLO metadata
+- Sanitizes the requested filename
+- Accepts DATA packets in any order
+- Stores chunks as `.part` files
+- ACKs valid DATA packets, including duplicate or late DATA
+- Reassembles the file once all chunks arrive
+- Verifies the complete-file CRC32
+- Validates FIN and responds with FIN_ACK
+- Remains active briefly after FIN_ACK to handle duplicate or retransmitted FIN/DATA packets
 
-#### Receiver
+## Packet Structure
 
-The receiver:
+UDP datagrams generated by the protocol are limited to 1400 bytes.
 
-1. Binds a UDP socket to the requested port.
-2. Waits for a valid `HELLO`.
-3. Validates the file metadata.
-4. Sanitizes the transmitted filename.
-5. Sends `HELLO_ACK`.
-6. Accepts `DATA` packets in any order.
-7. Writes each received chunk to a temporary `.part` file.
-8. Sends an `ACK` for each valid chunk.
-9. Waits until every expected sequence number has been received.
-10. Reassembles the file in sequence order.
-11. Verifies the final file CRC32.
-12. Waits for a valid `FIN`.
-13. Sends `FIN_ACK`.
-14. Exits after a short grace period for duplicate/retransmitted `FIN` packets.
+Each packet contains a 16-byte custom header followed by an optional payload.
 
----
+| Field | Size |
+|---|---:|
+| Version | 1 byte |
+| Type | 1 byte |
+| Sequence Number | 4 bytes |
+| Total Chunks | 4 bytes |
+| Payload Length | 2 bytes |
+| Checksum | 4 bytes |
 
-## Packet Format
+### Checksum
 
-Every packet contains a fixed binary header followed by an optional payload.
+The checksum is a CRC32 calculated over the canonical packet representation containing:
 
-```text
-+---------+------+----------+--------------+-------------+----------+
-| Version | Type | Seq      | Total Chunks | Payload Len | Checksum |
-+---------+------+----------+--------------+-------------+----------+
-| 1 byte  |1 byte| 4 bytes  |   4 bytes    |   2 bytes   | 4 bytes  |
-+---------+------+----------+--------------+-------------+----------+
-|                         Payload                                  |
-+-------------------------------------------------------------------+
-```
-
-### Header fields
-
-| Field | Size | Description |
-|---|---:|---|
-| Version | 1 byte | Protocol version |
-| Type | 1 byte | Packet type |
-| Sequence Number | 4 bytes | Chunk/packet sequence number |
-| Total Chunks | 4 bytes | Number of chunks in the file |
-| Payload Length | 2 bytes | Size of the payload |
-| Checksum | 4 bytes | CRC32 integrity checksum |
-
-All multi-byte integer fields are serialized using network byte order.
-
-The protocol limits UDP datagrams to:
-
-```text
-MAX_PACKET_SIZE = 1400 bytes
-```
-
-File data is divided into:
-
-```text
-CHUNK_SIZE = 1200 bytes
-```
-
-File chunks are limited to 1200 bytes, leaving room for the custom 16-byte header while keeping the resulting UDP datagrams below 1400 bytes.
-
----
-
-## Checksum and Integrity
-
-The protocol uses **CRC32** for integrity checking.
-
-For serialized packets, the checksum is calculated over the canonical representation of:
-
-```text
-version
-type
-sequence number
-total chunks
-payload length
-payload
-```
+- Protocol version
+- Packet type
+- Sequence number
+- Total chunk count
+- Payload length
+- Payload
 
 The checksum field itself is excluded from the calculation.
 
-In addition to packet-level integrity validation, the sender calculates a CRC32 over the complete original file and includes it in the `HELLO` metadata.
+### Data Size
 
-After receiving all chunks, the receiver:
-
-1. Reassembles the file.
-2. Calculates the CRC32 of the reconstructed file.
-3. Compares it with the expected file CRC.
-4. Accepts the transfer only when the CRC values match.
-
-This provides both packet-level corruption detection and end-to-end file integrity verification.
-
-CRC32 is an integrity mechanism, **not cryptographic authentication or encryption**.
-
----
-
-## Reliability Mechanism
-
-UDP itself does not guarantee:
-
-- Delivery
-- Ordering
-- Duplicate suppression
-- Retransmission
-- Data integrity
-
-Reliable-UDP implements these mechanisms at the application layer.
-
-### Sequence Numbers
-
-Every `DATA` packet receives a sequence number:
-
-```text
-0, 1, 2, 3, ...
-```
-
-The receiver stores chunks using these sequence numbers and reconstructs the final file in numerical order.
-
-This allows packets to arrive out of order without corrupting the resulting file.
-
-### Acknowledgments
-
-For every valid `DATA` packet received, the receiver sends an `ACK` containing the corresponding sequence number.
-
-The sender maintains state for every chunk:
-
-```text
-sent
-acked
-last_sent_time
-retry_count
-```
-
-### Retransmission
-
-If a packet remains unacknowledged beyond:
-
-```text
-TIMEOUT_MS_DEFAULT = 500 ms
-```
-
-the sender retransmits it.
-
-The maximum retry count is:
-
-```text
-MAX_RETRIES = 10
-```
-
-If the retransmission limit is exceeded, the transfer fails.
-
-### Transmission Window
-
-The sender limits new outstanding transmissions to:
-
-```text
-DEFAULT_WINDOW = 32 packets
-```
-
-This provides a bounded transmission window instead of attempting to send the entire file at once.
-
-The current implementation does **not** implement TCP-style congestion control, adaptive RTT estimation, selective ACK negotiation, or fast retransmit.
-
----
+- `CHUNK_SIZE = 1200` bytes
+- `MAX_PACKET_SIZE = 1400` bytes
+- Protocol header size = 16 bytes
 
 ## Protocol Flow
 
-A successful transfer follows this general sequence:
+### 1. Handshake
 
-```text
-Sender                                  Receiver
-  |                                        |
-  | ----------- HELLO -------------------> |
-  |                                        |
-  | <--------- HELLO_ACK ----------------- |
-  |                                        |
-  | ----------- DATA #0 -----------------> |
-  | <----------- ACK #0 ------------------ |
-  |                                        |
-  | ----------- DATA #1 -----------------> |
-  | <----------- ACK #1 ------------------ |
-  |                                        |
-  |              ...                       |
-  |                                        |
-  | ----------- DATA #N -----------------> |
-  | <----------- ACK #N ------------------ |
-  |                                        |
-  | ----------- FIN ---------------------> |
-  | <--------- FIN_ACK ------------------- |
-  |                                        |
-```
+The sender transmits a `HELLO` packet containing:
 
-If an individual data packet is lost, the sender retransmits it after the timeout expires.
+- Filename
+- Total chunk count
+- Complete-file CRC32
 
----
+The receiver validates the metadata and responds with `HELLO_ACK`.
 
-## Project Structure
+### 2. Data Transmission
 
-```text
-Reliable-UDP/
-│
-├── sender.cpp
-├── receiver.cpp
-│
-├── protocol.cpp
-├── protocol.h
-│
-├── utils.cpp
-├── utils.h
-│
-├── README.md
-└── .vscode/
-```
+The sender transmits numbered `DATA` packets using a bounded window of outstanding packets.
 
----
+Each packet contains:
 
-## Requirements
+- Sequence number
+- Total chunk count
+- File data
 
-### Operating System
+The receiver accepts packets out of order and stores them using their sequence numbers.
 
-The project uses POSIX networking APIs and filesystem functionality.
+### 3. Acknowledgment and Retransmission
 
-Recommended environment:
+Every valid DATA packet receives an individual `ACK`.
 
-- Linux
-- WSL
-- Other POSIX-compatible environments with the required C++17 support
+The sender:
 
-### Compiler
+- Tracks the state of every chunk
+- Maintains the number of outstanding packets
+- Retransmits packets whose individual timeout expires
+- Tracks retry counts per packet
+- Stops the transfer if a packet exceeds the maximum retry count
 
-A C++ compiler with C++17 support is required.
+The default retransmission timeout is 500 ms, with a maximum of 10 retransmissions per packet.
 
-For example:
+### 4. Integrity and Reassembly
 
-```bash
-g++
-```
+Once every expected chunk has been received, the receiver:
 
----
+1. Reassembles the `.part` files in sequence order.
+2. Computes the CRC32 of the reconstructed file.
+3. Compares it against the CRC32 advertised during the HELLO handshake.
 
-## Building
+The transfer is considered verified only when the complete-file CRC matches.
 
-Clone the repository:
+### 5. Teardown
 
-```bash
-git clone https://github.com/AbhiAnand-1011/Reliable-UDP.git
-cd Reliable-UDP
-```
+After all DATA packets have been acknowledged, the sender transmits `FIN`.
 
-Compile the receiver:
+The receiver validates the FIN metadata and responds with `FIN_ACK`.
 
-```bash
-g++ -std=c++17 -O2 -Wall -Wextra receiver.cpp protocol.cpp utils.cpp -o receiver
-```
+The receiver remains active for a short grace period so that duplicate or retransmitted FIN/DATA packets can still be acknowledged.
 
-Compile the sender:
+## Reliability Model
+
+UDP itself does not provide:
+
+- Guaranteed delivery
+- Packet ordering
+- Duplicate suppression
+- Retransmission
+- Application-level delivery confirmation
+
+Reliable-UDP implements these mechanisms at the application layer using:
+
+- Sequence numbers
+- Per-packet ACKs
+- Bounded outstanding-packet window
+- Timeout-based retransmission
+- Retry limits
+- CRC32 integrity validation
+- Ordered file reassembly
+- FIN/FIN_ACK transfer teardown
+
+The current implementation does not provide TCP-style congestion control, adaptive RTT estimation, fast retransmit, or selective acknowledgment negotiation.
+
+## Filename Safety
+
+The receiver sanitizes filenames before creating the output file.
+
+Path separators, absolute paths, `.`, and `..` are rejected to prevent the sender from influencing paths outside the configured output directory.
+
+## Usage
+
+### Prerequisites
+
+- Linux, macOS, or another POSIX-compatible environment
+- C++17-compatible compiler
+- `g++`
+- POSIX UDP socket support
+
+### Build
+
+From the project root:
 
 ```bash
 g++ -std=c++17 -O2 -Wall -Wextra sender.cpp protocol.cpp utils.cpp -o sender
+g++ -std=c++17 -O2 -Wall -Wextra receiver.cpp protocol.cpp utils.cpp -o receiver
 ```
 
-After compilation:
-
-```bash
-ls -lh sender receiver
-```
-
----
-
-## Basic Local Test
-
-The simplest test runs both endpoints on the same machine using the loopback interface.
-
-### 1. Create a test file
-
-```bash
-echo "Hello from Reliable-UDP" > test.txt
-```
-
-### 2. Start the receiver
-
-Open Terminal 1:
+### Start the Receiver
 
 ```bash
 mkdir -p received
 ./receiver 9000 received
 ```
 
-Expected output:
+The receiver arguments are:
 
 ```text
-receiver listening on port 9000
+receiver <port> <output_directory>
 ```
 
-### 3. Start the sender
+### Start the Sender
 
-Open Terminal 2:
+In another terminal:
 
 ```bash
-./sender 127.0.0.1 9000 test.txt
+./sender 127.0.0.1 9000 test_file.txt
 ```
 
-The sender should report the handshake, transmission, acknowledgments, and final teardown.
-
-### 4. Verify the received file
-
-```bash
-cat received/test.txt
-```
-
-Then compare the files directly:
-
-```bash
-cmp test.txt received/test.txt && echo "TRANSFER OK"
-```
-
-Expected:
+The sender arguments are:
 
 ```text
-TRANSFER OK
+sender <receiver_ip> <port> <file_path>
 ```
 
----
+For local testing, `127.0.0.1` can be used as the receiver IP.
 
-## Testing a Larger File
+### Verify the Transfer
 
-The protocol is designed around 1200-byte chunks, so a larger file is useful for exercising multiple packets and acknowledgments.
-
-For example:
+After the transfer completes:
 
 ```bash
-dd if=/dev/urandom of=large_test.bin bs=1M count=10
+cmp test_file.txt received/test_file.txt && echo "TRANSFER OK"
 ```
 
-Start the receiver:
+## Benchmarking
 
-```bash
-mkdir -p received
-./receiver 9000 received
-```
-
-Then transfer the file:
-
-```bash
-./sender 127.0.0.1 9000 large_test.bin
-```
-
-Verify the result:
-
-```bash
-cmp large_test.bin received/large_test.bin && echo "TRANSFER OK"
-```
-
-You can also compare cryptographic hashes independently:
-
-```bash
-sha256sum large_test.bin received/large_test.bin
-```
-
-The two SHA-256 values should match.
-
----
-
-## Testing Between Two Machines
-
-The receiver binds to:
+The project includes a small benchmark and analysis pipeline:
 
 ```text
-0.0.0.0:<port>
+benchmark/
+├── run_benchmark.sh
+└── analyze.py
 ```
 
-so it can accept UDP packets arriving through the machine's network interfaces.
-
-On the receiving machine:
+Run the benchmark with:
 
 ```bash
-./receiver 9000 received
+RUNS=30 FILE=bench_10MiB.bin ./benchmark/run_benchmark.sh
 ```
 
-Find the receiver's IP address:
+Analyze the collected results with:
 
 ```bash
-ip addr
+python3 benchmark/analyze.py
 ```
 
-Then run the sender from another machine:
+The benchmark records:
 
-```bash
-./sender <receiver-ip> 9000 test.txt
-```
+- Transfer time
+- Goodput
+- Initial DATA transmissions
+- Retransmissions
+- Retransmission rate
+- ACK count
+- RTT sample count
+- Per-run RTT p50/p95/p99
 
-For example:
+## Measured Results
 
-```bash
-./sender 192.168.1.20 9000 test.txt
-```
+The following measurements were collected from the current implementation.
 
-The UDP port must be reachable between the two machines, and any host firewall must allow the selected UDP port.
+### Baseline: No Induced Packet Loss
 
----
+Test configuration:
 
-## Current Implementation Characteristics
+- 30 runs
+- 10 MiB file per run
+- Sender and receiver on localhost
+- No artificial packet loss
 
-| Parameter | Value |
+| Metric | Result |
 |---|---:|
-| Protocol version | 1 |
-| Data chunk size | 1200 bytes |
-| Maximum UDP datagram size | 1400 bytes |
-| Sender window | 32 packets |
-| Retransmission timeout | 500 ms |
-| Maximum retries | 10 |
-| Integrity mechanism | CRC32 |
+| Successful runs | 30 / 30 |
+| Success rate | 100% |
+| Median transfer time | 607.09 ms |
+| p95 transfer time | 718.52 ms |
+| p99 transfer time | 767.92 ms |
+| Median goodput | 138.18 Mbps |
+| Retransmissions | 0 |
+| Retransmission rate | 0% |
+| ACK completion | 100% |
+
+Median per-run RTT percentiles:
+
+- RTT p50: 2.028 ms
+- RTT p95: 3.162 ms
+- RTT p99: 4.434 ms
+
+### 1% Induced Packet Loss
+
+Test configuration:
+
+- 30 runs
+- 10 MiB file per run
+- Localhost
+- 1% packet loss induced on the loopback interface using Linux `tc netem`
+
+| Metric | Result |
+|---|---:|
+| Successful runs | 30 / 30 |
+| Success rate | 100% |
+| Median transfer time | 3915.78 ms |
+| p95 transfer time | 4155.57 ms |
+| p99 transfer time | 4404.43 ms |
+| Median goodput | 21.43 Mbps |
+| Retransmissions | 5,535 |
+| Retransmission rate | 2.11% |
+| ACK completion | 100% |
+
+Median per-run RTT percentiles:
+
+- RTT p50: 0.882 ms
+- RTT p95: 1.728 ms
+- RTT p99: 2.804 ms
+
+The packet-loss test demonstrates that the protocol can complete file transfers successfully despite induced loss by retransmitting missing or unacknowledged DATA packets.
+
+## Implementation Characteristics
+
+| Property | Current Implementation |
+|---|---|
 | Transport | UDP |
-| Socket API | POSIX sockets |
+| Language | C++17 |
+| DATA chunk size | 1200 bytes |
+| Maximum UDP datagram size | 1400 bytes |
+| Sender window | 32 outstanding packets |
+| ACK model | Per-packet ACK |
+| Retransmission timeout | 500 ms |
+| Maximum retransmissions | 10 per packet |
+| Integrity mechanism | CRC32 |
+| Ordering | Sequence-number based |
+| Receiver storage | Temporary `.part` files |
+| Final verification | Complete-file CRC32 |
+| Encryption | Not implemented |
+| Authentication | Not implemented |
+| Congestion control | Not implemented |
+| Adaptive RTT estimation | Not implemented |
+| Selective ACK negotiation | Not implemented |
 
----
+## Known Limitations
 
-## Current Limitations
-
-This implementation is intentionally focused on the core mechanisms of a reliable UDP file-transfer protocol.
-
-### No congestion control
-
-There is currently no TCP-like congestion-control algorithm such as:
-
-- Slow start
-- Congestion avoidance
-- Fast retransmit
-- Fast recovery
-- Dynamic congestion window
-
-### Fixed retransmission timeout
-
-The retransmission timeout is currently a fixed:
-
-```text
-500 ms
-```
-
-It is not calculated dynamically from measured RTT.
-
-### No selective ACK bitmap in active transfer
-
-Bitmap encode/decode functionality exists in the protocol layer, but the current sender and receiver use individual ACK packets for received sequence numbers.
-
-### NACK is not currently used
-
-`NACK` packet construction exists but the active transfer path does not currently send or process NACK packets.
-
-### Sender memory usage
-
-The sender reads the complete file into memory as a collection of chunks before starting transmission.
-
-### Temporary chunk files
-
-The receiver stores incoming chunks as:
-
-```text
-0.part
-1.part
-2.part
-...
-```
-
-These temporary files are used during reconstruction and are currently not automatically deleted after the transfer.
-
-### One transfer per receiver process
-
-The receiver handles a transfer and then exits after its FIN grace period rather than operating as a continuously available multi-client server.
-
-### Empty-file edge case
-
-Empty files are recognized as zero-chunk transfers and can complete the protocol exchange, but the current receiver path does not create a zero-byte output file.
-
-### No encryption or authentication
-
-The protocol provides integrity checking with CRC32 but does not provide:
-
-- Encryption
-- Authentication
-- Confidentiality
-- Protection against an active attacker modifying packets
-
----
+- The sender currently loads the complete input file into memory before transmission.
+- The retransmission timeout is fixed at 500 ms.
+- There is no congestion-control mechanism.
+- RTT estimation is observational rather than adaptive.
+- NACK and bitmap helpers are implemented but are not used by the active transfer path.
+- Temporary `.part` files are not automatically removed after successful assembly.
+- The receiver is designed around one active transfer per process.
+- The protocol provides no encryption or authentication.
+- Empty-file handling is supported through the protocol handshake and FIN exchange but is a special case of the general file-transfer path.
 
 ## What This Project Demonstrates
 
-This project provides practical implementation experience with:
+Reliable-UDP is intended as a systems and networking project demonstrating:
 
 - UDP socket programming
-- POSIX networking APIs
-- Binary protocol design
-- Packet serialization/deserialization
-- Network byte order
-- Sequence numbers
-- Bounded transmission windows
-- ACK-based reliability
+- Application-level reliability over an unreliable transport
+- Custom binary protocol design
+- Network byte-order serialization
+- Sequence numbering and acknowledgment
 - Timeout-based retransmission
-- Duplicate handling
-- Out-of-order delivery
-- File chunking
-- File reassembly
-- CRC32 integrity checks
-- Connection/session state machines
-- Basic protocol validation
-- C++17 filesystem and networking functionality
+- CRC32 integrity validation
+- Out-of-order packet handling
+- File reconstruction
+- POSIX networking
+- Stateful sender/receiver design
+- Reliability benchmarking under controlled packet loss
 
----
+## Possible Future Improvements
 
-## Future Improvements
+Potential extensions include:
 
-Possible extensions include:
-
-- Selective acknowledgment bitmaps
-- Active NACK handling
-- Adaptive RTT estimation
-- Dynamic retransmission timers
+- Adaptive retransmission timeouts based on measured RTT
+- Selective acknowledgments
+- NACK-driven retransmission
 - Congestion control
-- Fast retransmission
-- Zero-copy or streaming file transmission
-- Better duplicate/session handling
-- Transfer statistics and throughput measurement
-- Packet-loss simulation for automated reliability testing
-- Packet corruption simulation
-- Automated protocol tests
-- Persistent multi-client receiver
-- Optional encryption/authentication layer
-
----
+- Streaming file reads instead of loading the entire file into memory
+- Parallel or asynchronous disk writes
+- Transfer resumption after interruption
+- Authentication and encryption
+- More sophisticated network-condition benchmarking
 
 ## License
 
-This project is provided for educational and experimental purposes.
+Educational and experimental use.
