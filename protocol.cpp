@@ -132,7 +132,7 @@ bool deserializePacket(const std::vector<uint8_t> &buf, Packet &pkt) {
 
     if (pkt.header.payload_len > MAX_PACKET_SIZE - sizeof(PacketHeader))
         return false;
-    if (buf.size() < sizeof(PacketHeader) + pkt.header.payload_len)
+    if (buf.size() != sizeof(PacketHeader) + pkt.header.payload_len)
         return false;
 
     pkt.payload.resize(pkt.header.payload_len);
